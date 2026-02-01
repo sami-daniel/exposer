@@ -1,0 +1,13 @@
+[package]
+name = "exposer"
+version = "0.1.0"
+edition = "2024"
+
+[build-dependencies]
+bindgen = "0.72.1"
+
+[dependencies]
+anyhow = "1.0.100"
+bytemuck = { version = "1.25.0", features = ["derive", "min_const_generics"] }
+clap = { version = "4.5.56", features = ["derive"] }
+memmap2 = "0.9.9"
