@@ -17,8 +17,13 @@ struct Args {
 fn main() -> Result<()> {
     let args = Args::parse();
 
-    let volume = Volume::open(&args.partition)?;
+    let mut volume = Volume::open(&args.partition)?;
     println!("{}", volume.sb);
+
+    println!();
+    for group in volume.read_groups()? {
+        println!("{group}");
+    }
 
     Ok(())
 }

@@ -122,3 +122,33 @@ pub struct ext4_super_block {
 }
 
 const _: () = assert!(core::mem::size_of::<ext4_super_block>() == 1024);
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone, Pod, Zeroable)]
+pub struct ext4_group_desc {
+    pub bg_block_bitmap_lo: __le32,
+    pub bg_inode_bitmap_lo: __le32,
+    pub bg_inode_table_lo: __le32,
+    pub bg_free_blocks_count_lo: __le16,
+    pub bg_free_inodes_count_lo: __le16,
+    pub bg_used_dirs_count_lo: __le16,
+    pub bg_flags: __le16,
+    pub bg_exclude_bitmap_lo: __le32,
+    pub bg_block_bitmap_csum_lo: __le16,
+    pub bg_inode_bitmap_csum_lo: __le16,
+    pub bg_itable_unused_lo: __le16,
+    pub bg_checksum: __le16,
+    pub bg_block_bitmap_hi: __le32,
+    pub bg_inode_bitmap_hi: __le32,
+    pub bg_inode_table_hi: __le32,
+    pub bg_free_blocks_count_hi: __le16,
+    pub bg_free_inodes_count_hi: __le16,
+    pub bg_used_dirs_count_hi: __le16,
+    pub bg_itable_unused_hi: __le16,
+    pub bg_exclude_bitmap_hi: __le32,
+    pub bg_block_bitmap_csum_hi: __le16,
+    pub bg_inode_bitmap_csum_hi: __le16,
+    pub bg_reserved: __le32,
+}
+
+const _: () = assert!(core::mem::size_of::<ext4_group_desc>() == 64);

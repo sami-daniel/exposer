@@ -7,7 +7,7 @@ use std::{
 
 use anyhow::{Result, bail};
 
-use crate::types::ext4_super_block;
+use crate::types::{ext4_group_desc, ext4_super_block};
 
 /// The superblock always starts 1024 bytes into the volume, whatever the block
 /// size is. The bytes before it belong to boot records.
@@ -158,6 +158,60 @@ impl fmt::Display for Superblock {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct GroupDescriptor {
+    pub group: u32,
+    pub block_bitmap: u64,
+    pub inode_bitmap: u64,
+    pub inode_table: u64,
+    pub free_blocks_count: u32,
+    pub free_inodes_count: u32,
+    pub used_dirs_count: u32,
+}
+
+impl GroupDescriptor {
+    fn from_raw(group: u32, raw: ext4_group_desc, has_64bit: bool) -> Self {
+        Self {
+            group,
+            block_bitmap: fold64(raw.bg_block_bitmap_lo, raw.bg_block_bitmap_hi, has_64bit),
+            inode_bitmap: fold64(raw.bg_inode_bitmap_lo, raw.bg_inode_bitmap_hi, has_64bit),
+            inode_table: fold64(raw.bg_inode_table_lo, raw.bg_inode_table_hi, has_64bit),
+            free_blocks_count: fold32(
+                raw.bg_free_blocks_count_lo,
+                raw.bg_free_blocks_count_hi,
+                has_64bit,
+            ),
+            free_inodes_count: fold32(
+                raw.bg_free_inodes_count_lo,
+                raw.bg_free_inodes_count_hi,
+                has_64bit,
+            ),
+            used_dirs_count: fold32(
+                raw.bg_used_dirs_count_lo,
+                raw.bg_used_dirs_count_hi,
+                has_64bit,
+            ),
+        }
+    }
+}
+
+impl fmt::Display for GroupDescriptor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "group {:>3}: inode table @ block {}, block bitmap @ {}, inode bitmap @ {}, \
+             {} free blocks, {} free inodes, {} dirs",
+            self.group,
+            self.inode_table,
+            self.block_bitmap,
+            self.inode_bitmap,
+            self.free_blocks_count,
+            self.free_inodes_count,
+            self.used_dirs_count,
+        )
+    }
+}
+
 pub struct Volume {
     file: File,
     pub sb: Superblock,
@@ -186,12 +240,46 @@ impl Volume {
         self.file.read_exact(&mut buf)?;
         Ok(buf)
     }
+
+    pub fn group_count(&self) -> u64 {
+        self.sb
+            .blocks_count
+            .div_ceil(self.sb.blocks_per_group as u64)
+    }
+
+    pub fn read_group(&mut self, group: u32) -> Result<GroupDescriptor> {
+        let desc_size = self.sb.desc_size as usize;
+        let table_start = (self.sb.first_data_block as u64 + 1) * self.sb.block_size;
+        let offset = table_start + group as u64 * desc_size as u64;
+
+        let mut buf = [0u8; 64];
+        let bytes = self.read_at(offset, desc_size)?;
+        buf[..desc_size].copy_from_slice(&bytes);
+        let raw: ext4_group_desc = *bytemuck::from_bytes(&buf);
+
+        Ok(GroupDescriptor::from_raw(group, raw, self.sb.has_64bit))
+    }
+
+    pub fn read_groups(&mut self) -> Result<Vec<GroupDescriptor>> {
+        (0..self.group_count() as u32)
+            .map(|g| self.read_group(g))
+            .collect()
+    }
 }
 
 fn fold64(lo: u32, hi: u32, has_64bit: bool) -> u64 {
     let lo = u32::from_le(lo) as u64;
     if has_64bit {
         lo | ((u32::from_le(hi) as u64) << 32)
+    } else {
+        lo
+    }
+}
+
+fn fold32(lo: u16, hi: u16, has_64bit: bool) -> u32 {
+    let lo = u16::from_le(lo) as u32;
+    if has_64bit {
+        lo | ((u16::from_le(hi) as u32) << 16)
     } else {
         lo
     }
