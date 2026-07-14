@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     fmt,
     fs::File,
     io::{Read, Seek, SeekFrom},
@@ -91,6 +92,7 @@ pub struct DirEntry {
 pub struct Volume {
     file: File,
     pub sb: Superblock,
+    group_descriptor_map: HashMap<u32, GroupDescriptor>,
 }
 
 impl Superblock {
@@ -393,7 +395,11 @@ impl Volume {
         let raw: Ext4SuperBlock = *bytemuck::from_bytes(&buf);
 
         let sb = Superblock::from_raw(raw)?;
-        Ok(Self { file, sb })
+        Ok(Self {
+            file,
+            sb,
+            group_descriptor_map: HashMap::new(),
+        })
     }
 
     pub fn read_block(&mut self, block: u64) -> Result<Vec<u8>> {
@@ -413,7 +419,11 @@ impl Volume {
             .div_ceil(self.sb.blocks_per_group as u64)
     }
 
-    pub fn read_group(&mut self, group: u32) -> Result<GroupDescriptor> {
+    pub fn read_group<'a>(&'a mut self, group: u32) -> Result<GroupDescriptor> {
+        if let Some(desc) = self.group_descriptor_map.get(&group) {
+            return Ok(desc.clone());
+        }
+
         let desc_size = self.sb.desc_size as usize;
         let table_start = (self.sb.first_data_block as u64 + 1) * self.sb.block_size;
         let offset = table_start + group as u64 * desc_size as u64;
@@ -423,7 +433,12 @@ impl Volume {
         buf[..desc_size].copy_from_slice(&bytes);
         let raw: Ext4GroupDescriptor = *bytemuck::from_bytes(&buf);
 
-        Ok(GroupDescriptor::from_raw(group, raw, self.sb.has_64bit))
+        self.group_descriptor_map.insert(
+            group,
+            GroupDescriptor::from_raw(group, raw, self.sb.has_64bit),
+        );
+
+        Ok(self.group_descriptor_map.get(&group).unwrap().clone())
     }
 
     pub fn read_groups(&mut self) -> Result<Vec<GroupDescriptor>> {
