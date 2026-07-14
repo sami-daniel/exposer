@@ -4,7 +4,7 @@ mod types;
 use std::path::PathBuf;
 
 use anyhow::Result;
-use clap::Parser;
+use clap::{ArgAction, Parser};
 
 use crate::ext4::Volume;
 
@@ -16,6 +16,16 @@ struct Args {
     /// Show one inode by number, or every allocated inode when given with no number
     #[arg(long, value_name = "N", num_args = 0..=1, default_missing_value = "0")]
     inode: Option<u32>,
+
+    /// Include free inodes when using the inode listing mode
+    #[arg(
+        long,
+        action = ArgAction::Set,
+        default_value_t = false,
+        default_missing_value = "true",
+        num_args = 0..=1
+    )]
+    free_inodes: bool,
 
     /// List a directory by inode number. Defaults to the root directory
     #[arg(long, value_name = "N", num_args = 0..=1, default_missing_value = "2")]
@@ -45,7 +55,7 @@ fn main() -> Result<()> {
 
     println!();
     match args.inode {
-        Some(0) => list_inodes(&mut volume)?,
+        Some(0) => list_inodes(&mut volume, args.free_inodes)?,
         Some(number) => println!("{}", volume.read_inode(number)?),
         _ => {}
     }
@@ -53,11 +63,18 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn list_inodes(volume: &mut Volume) -> Result<()> {
+fn list_inodes(volume: &mut Volume, include_free: bool) -> Result<()> {
     for number in 1..=volume.sb.inodes_count {
         let inode = volume.read_inode(number)?;
-        if inode.links_count > 0 {
-            println!("{inode:#}");
+        if inode.links_count > 0 || include_free {
+            println!(
+                "{inode:#}{}",
+                if inode.links_count == 0 {
+                    " (free inode)"
+                } else {
+                    ""
+                }
+            );
         }
     }
     Ok(())
