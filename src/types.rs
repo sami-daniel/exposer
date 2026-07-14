@@ -191,3 +191,39 @@ pub struct ext4_inode {
 }
 
 const _: () = assert!(core::mem::size_of::<ext4_inode>() == 160);
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone, Pod, Zeroable)]
+pub struct ext4_extent_header {
+    pub eh_magic: __le16,
+    pub eh_entries: __le16,
+    pub eh_max: __le16,
+    pub eh_depth: __le16,
+    pub eh_generation: __le32,
+}
+
+const _: () = assert!(core::mem::size_of::<ext4_extent_header>() == 12);
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone, Pod, Zeroable)]
+pub struct ext4_extent {
+    pub ee_block: __le32,
+    pub ee_len: __le16,
+    pub ee_start_hi: __le16,
+    pub ee_start_lo: __le32,
+}
+
+const _: () = assert!(core::mem::size_of::<ext4_extent>() == 12);
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone, Pod, Zeroable)]
+pub struct ext4_dir_entry_2 {
+    pub inode: __le32,
+    pub rec_len: __le16,
+    pub name_len: __u8,
+    pub file_type: __u8,
+    /* name is variable length, read from the raw bytes after this struct instead
+     * of bytemucking it */
+}
+
+const _: () = assert!(core::mem::size_of::<ext4_dir_entry_2>() == 8);

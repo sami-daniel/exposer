@@ -7,17 +7,24 @@ use std::{
 
 use anyhow::{Result, bail};
 
-use crate::types::{ext4_group_desc, ext4_inode, ext4_super_block};
+use crate::types::{
+    ext4_dir_entry_2, ext4_extent, ext4_extent_header, ext4_group_desc, ext4_inode,
+    ext4_super_block,
+};
 
-/// The superblock always starts 1024 bytes into the volume, whatever the block
-/// size is. The bytes before it belong to boot records.
 const SUPERBLOCK_OFFSET: u64 = 1024;
-
 const EXT4_MAGIC: u16 = 0xEF53;
-
 const INCOMPAT_FILETYPE: u32 = 0x0002;
 const INCOMPAT_EXTENTS: u32 = 0x0040;
 const INCOMPAT_64BIT: u32 = 0x0080;
+const EXT4_EXT_MAGIC: u16 = 0xF30A;
+const EXT_INIT_MAX_LEN: u16 = 1 << 15;
+const EXT4_LEGACY_INODE_SIZE: u16 = 128;
+const EXT4_MIN_BLOCK_SIZE: u64 = 1024;
+const EXT4_MIN_DESC_SIZE: u16 = 32;
+const EXT4_MAX_DESC_SIZE: usize = 64;
+
+const MODE_PERM_MASK: u16 = 0o7777;
 
 #[derive(Debug, Clone)]
 pub struct Superblock {
@@ -41,9 +48,55 @@ pub struct Superblock {
     pub has_filetype: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct GroupDescriptor {
+    pub group: u32,
+    pub block_bitmap: u64,
+    pub inode_bitmap: u64,
+    pub inode_table: u64,
+    pub free_blocks_count: u32,
+    pub free_inodes_count: u32,
+    pub used_dirs_count: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct Inode {
+    pub number: u32,
+    pub mode: u16,
+    pub uid: u32,
+    pub gid: u32,
+    pub size: u64,
+    pub links_count: u16,
+    pub blocks: u64,
+    pub flags: u32,
+    pub atime: u32,
+    pub ctime: u32,
+    pub mtime: u32,
+    pub crtime: u32,
+    pub i_block: [u32; 15],
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Extent {
+    pub len: u16,
+    pub physical: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct DirEntry {
+    pub inode: u32,
+    pub file_type: u8,
+    pub name: String,
+}
+
+pub struct Volume {
+    file: File,
+    pub sb: Superblock,
+}
+
 impl Superblock {
     fn from_raw(raw: ext4_super_block) -> Result<Self> {
-        let magic = u16::from_le(raw.s_magic);
+        let magic = raw.s_magic;
         if magic != EXT4_MAGIC {
             bail!(
                 "not an ext4 volume: magic is {:#06x}, expected {:#06x}",
@@ -52,13 +105,13 @@ impl Superblock {
             );
         }
 
-        let incompat = u32::from_le(raw.s_feature_incompat);
+        let incompat = raw.s_feature_incompat;
         let has_64bit = incompat & INCOMPAT_64BIT != 0;
         let has_extents = incompat & INCOMPAT_EXTENTS != 0;
         let has_filetype = incompat & INCOMPAT_FILETYPE != 0;
 
         // For some reason this is stored as a shift: https://docs.kernel.org/filesystems/ext4/super.html
-        let block_size = 1024u64 << u32::from_le(raw.s_log_block_size);
+        let block_size = EXT4_MIN_BLOCK_SIZE << raw.s_log_block_size;
 
         let blocks_count = fold64(raw.s_blocks_count_lo, raw.s_blocks_count_hi, has_64bit);
         let free_blocks_count = fold64(
@@ -68,15 +121,15 @@ impl Superblock {
         );
 
         let desc_size = if has_64bit {
-            u16::from_le(raw.s_desc_size).max(32)
+            raw.s_desc_size.max(EXT4_MIN_DESC_SIZE)
         } else {
-            32
+            EXT4_MIN_DESC_SIZE
         };
 
-        let inode_size = if u32::from_le(raw.s_rev_level) == 0 {
-            128
+        let inode_size = if raw.s_rev_level == 0 {
+            EXT4_LEGACY_INODE_SIZE
         } else {
-            u16::from_le(raw.s_inode_size)
+            raw.s_inode_size
         };
 
         Ok(Self {
@@ -84,11 +137,11 @@ impl Superblock {
             block_size,
             blocks_count,
             free_blocks_count,
-            inodes_count: u32::from_le(raw.s_inodes_count),
-            free_inodes_count: u32::from_le(raw.s_free_inodes_count),
-            blocks_per_group: u32::from_le(raw.s_blocks_per_group),
-            inodes_per_group: u32::from_le(raw.s_inodes_per_group),
-            first_data_block: u32::from_le(raw.s_first_data_block),
+            inodes_count: raw.s_inodes_count,
+            free_inodes_count: raw.s_free_inodes_count,
+            blocks_per_group: raw.s_blocks_per_group,
+            inodes_per_group: raw.s_inodes_per_group,
+            first_data_block: raw.s_first_data_block,
             inode_size,
             desc_size,
             has_64bit,
@@ -158,17 +211,6 @@ impl fmt::Display for Superblock {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct GroupDescriptor {
-    pub group: u32,
-    pub block_bitmap: u64,
-    pub inode_bitmap: u64,
-    pub inode_table: u64,
-    pub free_blocks_count: u32,
-    pub free_inodes_count: u32,
-    pub used_dirs_count: u32,
-}
-
 impl GroupDescriptor {
     fn from_raw(group: u32, raw: ext4_group_desc, has_64bit: bool) -> Self {
         Self {
@@ -212,90 +254,77 @@ impl fmt::Display for GroupDescriptor {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct Inode {
-    pub number: u32,
-    pub mode: u16,
-    pub uid: u32,
-    pub gid: u32,
-    pub size: u64,
-    pub links_count: u16,
-    pub blocks: u64,
-    pub flags: u32,
-    pub atime: u32,
-    pub ctime: u32,
-    pub mtime: u32,
-    pub crtime: u32,
-}
-
 impl Inode {
     fn from_raw(number: u32, raw: ext4_inode) -> Self {
-        let uid = u16::from_le(raw.i_uid) as u32 | ((u16::from_le(raw.l_i_uid_high) as u32) << 16);
-        let gid = u16::from_le(raw.i_gid) as u32 | ((u16::from_le(raw.l_i_gid_high) as u32) << 16);
-        let size =
-            u32::from_le(raw.i_size_lo) as u64 | ((u32::from_le(raw.i_size_high) as u64) << 32);
-        let blocks = u32::from_le(raw.i_blocks_lo) as u64
-            | ((u16::from_le(raw.l_i_blocks_high) as u64) << 32);
+        let uid = raw.i_uid as u32 | ((raw.l_i_uid_high as u32) << 16);
+        let gid = raw.i_gid as u32 | ((raw.l_i_gid_high as u32) << 16);
+        let size = raw.i_size_lo as u64 | ((raw.i_size_high as u64) << 32);
+        let blocks = raw.i_blocks_lo as u64 | ((raw.l_i_blocks_high as u64) << 32);
 
         Self {
             number,
-            mode: u16::from_le(raw.i_mode),
+            mode: raw.i_mode,
             uid,
             gid,
             size,
-            links_count: u16::from_le(raw.i_links_count),
+            links_count: raw.i_links_count,
             blocks,
-            flags: u32::from_le(raw.i_flags),
-            atime: u32::from_le(raw.i_atime),
-            ctime: u32::from_le(raw.i_ctime),
-            mtime: u32::from_le(raw.i_mtime),
-            crtime: u32::from_le(raw.i_crtime),
+            flags: raw.i_flags,
+            atime: raw.i_atime,
+            ctime: raw.i_ctime,
+            mtime: raw.i_mtime,
+            crtime: raw.i_crtime,
+            i_block: raw.i_block,
         }
     }
 
+    pub fn is_dir(&self) -> bool {
+        self.mode as u32 & libc::S_IFMT == libc::S_IFDIR
+    }
+
     pub fn file_type(&self) -> &'static str {
-        match self.mode & 0xF000 {
-            0x1000 => "fifo",
-            0x2000 => "character device",
-            0x4000 => "directory",
-            0x6000 => "block device",
-            0x8000 => "regular file",
-            0xA000 => "symlink",
-            0xC000 => "socket",
+        match self.mode as u32 & libc::S_IFMT {
+            libc::S_IFIFO => "fifo",
+            libc::S_IFCHR => "character device",
+            libc::S_IFDIR => "directory",
+            libc::S_IFBLK => "block device",
+            libc::S_IFREG => "regular file",
+            libc::S_IFLNK => "symlink",
+            libc::S_IFSOCK => "socket",
             _ => "unknown",
         }
     }
 
     pub fn permissions(&self) -> u16 {
-        self.mode & 0o7777
+        self.mode & MODE_PERM_MASK
     }
 
     pub fn mode_string(&self) -> String {
-        let type_char = match self.mode & 0xF000 {
-            0x1000 => 'p',
-            0x2000 => 'c',
-            0x4000 => 'd',
-            0x6000 => 'b',
-            0x8000 => '-',
-            0xA000 => 'l',
-            0xC000 => 's',
+        let type_char = match self.mode as u32 & libc::S_IFMT {
+            libc::S_IFIFO => 'p',
+            libc::S_IFCHR => 'c',
+            libc::S_IFDIR => 'd',
+            libc::S_IFBLK => 'b',
+            libc::S_IFREG => '-',
+            libc::S_IFLNK => 'l',
+            libc::S_IFSOCK => 's',
             _ => '?',
         };
 
         let mut s = String::with_capacity(10);
         s.push(type_char);
         for (bit, ch) in [
-            (0o400, 'r'),
-            (0o200, 'w'),
-            (0o100, 'x'),
-            (0o040, 'r'),
-            (0o020, 'w'),
-            (0o010, 'x'),
-            (0o004, 'r'),
-            (0o002, 'w'),
-            (0o001, 'x'),
+            (libc::S_IRUSR, 'r'),
+            (libc::S_IWUSR, 'w'),
+            (libc::S_IXUSR, 'x'),
+            (libc::S_IRGRP, 'r'),
+            (libc::S_IWGRP, 'w'),
+            (libc::S_IXGRP, 'x'),
+            (libc::S_IROTH, 'r'),
+            (libc::S_IWOTH, 'w'),
+            (libc::S_IXOTH, 'x'),
         ] {
-            s.push(if self.mode & bit != 0 { ch } else { '-' });
+            s.push(if self.mode as u32 & bit != 0 { ch } else { '-' });
         }
         s
     }
@@ -332,16 +361,38 @@ impl fmt::Display for Inode {
     }
 }
 
-pub struct Volume {
-    file: File,
-    pub sb: Superblock,
+impl DirEntry {
+    pub fn file_type_str(&self) -> &'static str {
+        match self.file_type {
+            1 => "regular file",
+            2 => "directory",
+            3 => "character device",
+            4 => "block device",
+            5 => "fifo",
+            6 => "socket",
+            7 => "symlink",
+            _ => "unknown",
+        }
+    }
+}
+
+impl fmt::Display for DirEntry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{:>8}  {:<16}  {}",
+            self.inode,
+            self.file_type_str(),
+            self.name
+        )
+    }
 }
 
 impl Volume {
     pub fn open(path: &Path) -> Result<Self> {
         let mut file = File::open(path)?;
 
-        let mut buf = [0u8; 1024];
+        let mut buf = [0u8; core::mem::size_of::<ext4_super_block>()];
         file.seek(SeekFrom::Start(SUPERBLOCK_OFFSET))?;
         file.read_exact(&mut buf)?;
         let raw: ext4_super_block = *bytemuck::from_bytes(&buf);
@@ -372,7 +423,7 @@ impl Volume {
         let table_start = (self.sb.first_data_block as u64 + 1) * self.sb.block_size;
         let offset = table_start + group as u64 * desc_size as u64;
 
-        let mut buf = [0u8; 64];
+        let mut buf = [0u8; EXT4_MAX_DESC_SIZE];
         let bytes = self.read_at(offset, desc_size)?;
         buf[..desc_size].copy_from_slice(&bytes);
         let raw: ext4_group_desc = *bytemuck::from_bytes(&buf);
@@ -395,33 +446,113 @@ impl Volume {
         let group = (number - 1) / per_group;
         let index = (number - 1) % per_group;
 
+        // TODO: This could be cached
         let desc = self.read_group(group)?;
         let inode_size = self.sb.inode_size as u64;
         let offset = desc.inode_table * self.sb.block_size + index as u64 * inode_size;
 
         let bytes = self.read_at(offset, inode_size as usize)?;
-        let mut buf = [0u8; 160];
+        let mut buf = [0u8; core::mem::size_of::<ext4_inode>()];
         let n = bytes.len().min(buf.len());
         buf[..n].copy_from_slice(&bytes[..n]);
         let raw: ext4_inode = *bytemuck::from_bytes(&buf);
 
         Ok(Inode::from_raw(number, raw))
     }
+
+    pub fn read_dir(&mut self, inode: &Inode) -> Result<Vec<DirEntry>> {
+        if !inode.is_dir() {
+            bail!("inode {} is not a directory", inode.number);
+        }
+
+        let mut entries = Vec::new();
+        for extent in inode_extents(inode)? {
+            for i in 0..extent.len as u64 {
+                let block = self.read_block(extent.physical + i)?;
+                parse_dir_block(&block, &mut entries);
+            }
+        }
+        Ok(entries)
+    }
+}
+
+fn inode_extents(inode: &Inode) -> Result<Vec<Extent>> {
+    let header_size = core::mem::size_of::<ext4_extent_header>();
+    let extent_size = core::mem::size_of::<ext4_extent>();
+    let bytes: &[u8] = bytemuck::bytes_of(&inode.i_block);
+
+    let header: ext4_extent_header = *bytemuck::from_bytes(&bytes[..header_size]);
+    if header.eh_magic != EXT4_EXT_MAGIC {
+        bail!("inode {} is not extent mapped. Not supported", inode.number);
+    }
+
+    let depth = header.eh_depth;
+    // TODO: Support non depth 0 extent trees
+    if depth != 0 {
+        bail!("inode {} has a depth {depth} extent tree", inode.number);
+    }
+
+    let count = header.eh_entries as usize;
+    let mut extents = Vec::with_capacity(count);
+    for i in 0..count {
+        let off = header_size + i * extent_size;
+        let e: ext4_extent = *bytemuck::from_bytes(&bytes[off..off + extent_size]);
+
+        // ee_len over EXT_INIT_MAX_LEN marks an unwritten (preallocated) extent,
+        // whose real length is ee_len - EXT_INIT_MAX_LEN. A value of exactly
+        // EXT_INIT_MAX_LEN is a written extent of that length, not unwritten, so
+        // this is a compare, not a mask (see ext4_ext_get_actual_len)
+        let raw_len = e.ee_len;
+        let len = if raw_len <= EXT_INIT_MAX_LEN {
+            raw_len
+        } else {
+            raw_len - EXT_INIT_MAX_LEN
+        };
+        let physical = e.ee_start_lo as u64 | ((e.ee_start_hi as u64) << 32);
+
+        extents.push(Extent { len, physical });
+    }
+    Ok(extents)
+}
+
+fn parse_dir_block(block: &[u8], out: &mut Vec<DirEntry>) {
+    let head_size = core::mem::size_of::<ext4_dir_entry_2>();
+    let mut pos = 0;
+    while pos + head_size <= block.len() {
+        let head: ext4_dir_entry_2 = *bytemuck::from_bytes(&block[pos..pos + head_size]);
+        let rec_len = head.rec_len as usize;
+        let name_len = head.name_len as usize;
+
+        if rec_len < head_size {
+            break;
+        }
+
+        if head.inode != 0 && pos + head_size + name_len <= block.len() {
+            let name = &block[pos + head_size..pos + head_size + name_len];
+            out.push(DirEntry {
+                inode: head.inode,
+                file_type: head.file_type,
+                name: String::from_utf8_lossy(name).into_owned(),
+            });
+        }
+
+        pos += rec_len;
+    }
 }
 
 fn fold64(lo: u32, hi: u32, has_64bit: bool) -> u64 {
-    let lo = u32::from_le(lo) as u64;
+    let lo = lo as u64;
     if has_64bit {
-        lo | ((u32::from_le(hi) as u64) << 32)
+        lo | ((hi as u64) << 32)
     } else {
         lo
     }
 }
 
 fn fold32(lo: u16, hi: u16, has_64bit: bool) -> u32 {
-    let lo = u16::from_le(lo) as u32;
+    let lo = lo as u32;
     if has_64bit {
-        lo | ((u16::from_le(hi) as u32) << 16)
+        lo | ((hi as u32) << 16)
     } else {
         lo
     }

@@ -16,22 +16,38 @@ struct Args {
     /// Show one inode by number, or every allocated inode when given with no number
     #[arg(long, value_name = "N", num_args = 0..=1, default_missing_value = "0")]
     inode: Option<u32>,
+
+    /// List a directory by inode number. Defaults to the root directory
+    #[arg(long, value_name = "N", num_args = 0..=1, default_missing_value = "2")]
+    ls: Option<u32>,
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
     let mut volume = Volume::open(&args.partition)?;
 
-    match args.inode {
-        None => {
-            println!("{}", volume.sb);
-            println!();
-            for group in volume.read_groups()? {
-                println!("{group}");
-            }
+    if let Some(number) = args.ls {
+        let dir = volume.read_inode(number)?;
+        println!("{:>8}  {:<16}  {}", "inode", "file type", "name");
+        println!("{}", "-".repeat(40));
+
+        for entry in volume.read_dir(&dir)? {
+            println!("{entry}");
         }
+        return Ok(());
+    }
+
+    println!("{}", volume.sb);
+    println!();
+    for group in volume.read_groups()? {
+        println!("{group}");
+    }
+
+    println!();
+    match args.inode {
         Some(0) => list_inodes(&mut volume)?,
         Some(number) => println!("{}", volume.read_inode(number)?),
+        _ => {}
     }
 
     Ok(())
