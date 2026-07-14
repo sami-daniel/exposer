@@ -152,3 +152,42 @@ pub struct ext4_group_desc {
 }
 
 const _: () = assert!(core::mem::size_of::<ext4_group_desc>() == 64);
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone, Pod, Zeroable)]
+pub struct ext4_inode {
+    pub i_mode: __le16,
+    pub i_uid: __le16,
+    pub i_size_lo: __le32,
+    pub i_atime: __le32,
+    pub i_ctime: __le32,
+    pub i_mtime: __le32,
+    pub i_dtime: __le32,
+    pub i_gid: __le16,
+    pub i_links_count: __le16,
+    pub i_blocks_lo: __le32,
+    pub i_flags: __le32,
+    pub l_i_version: __le32,
+    pub i_block: [__le32; 15],
+    pub i_generation: __le32,
+    pub i_file_acl_lo: __le32,
+    pub i_size_high: __le32,
+    pub i_obso_faddr: __le32,
+    pub l_i_blocks_high: __le16,
+    pub l_i_file_acl_high: __le16,
+    pub l_i_uid_high: __le16,
+    pub l_i_gid_high: __le16,
+    pub l_i_checksum_lo: __le16,
+    pub l_i_reserved: __le16,
+    pub i_extra_isize: __le16,
+    pub i_checksum_hi: __le16,
+    pub i_ctime_extra: __le32,
+    pub i_mtime_extra: __le32,
+    pub i_atime_extra: __le32,
+    pub i_crtime: __le32,
+    pub i_crtime_extra: __le32,
+    pub i_version_hi: __le32,
+    pub i_projid: __le32,
+}
+
+const _: () = assert!(core::mem::size_of::<ext4_inode>() == 160);

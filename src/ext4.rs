@@ -7,7 +7,7 @@ use std::{
 
 use anyhow::{Result, bail};
 
-use crate::types::{ext4_group_desc, ext4_super_block};
+use crate::types::{ext4_group_desc, ext4_inode, ext4_super_block};
 
 /// The superblock always starts 1024 bytes into the volume, whatever the block
 /// size is. The bytes before it belong to boot records.
@@ -212,6 +212,126 @@ impl fmt::Display for GroupDescriptor {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct Inode {
+    pub number: u32,
+    pub mode: u16,
+    pub uid: u32,
+    pub gid: u32,
+    pub size: u64,
+    pub links_count: u16,
+    pub blocks: u64,
+    pub flags: u32,
+    pub atime: u32,
+    pub ctime: u32,
+    pub mtime: u32,
+    pub crtime: u32,
+}
+
+impl Inode {
+    fn from_raw(number: u32, raw: ext4_inode) -> Self {
+        let uid = u16::from_le(raw.i_uid) as u32 | ((u16::from_le(raw.l_i_uid_high) as u32) << 16);
+        let gid = u16::from_le(raw.i_gid) as u32 | ((u16::from_le(raw.l_i_gid_high) as u32) << 16);
+        let size =
+            u32::from_le(raw.i_size_lo) as u64 | ((u32::from_le(raw.i_size_high) as u64) << 32);
+        let blocks = u32::from_le(raw.i_blocks_lo) as u64
+            | ((u16::from_le(raw.l_i_blocks_high) as u64) << 32);
+
+        Self {
+            number,
+            mode: u16::from_le(raw.i_mode),
+            uid,
+            gid,
+            size,
+            links_count: u16::from_le(raw.i_links_count),
+            blocks,
+            flags: u32::from_le(raw.i_flags),
+            atime: u32::from_le(raw.i_atime),
+            ctime: u32::from_le(raw.i_ctime),
+            mtime: u32::from_le(raw.i_mtime),
+            crtime: u32::from_le(raw.i_crtime),
+        }
+    }
+
+    pub fn file_type(&self) -> &'static str {
+        match self.mode & 0xF000 {
+            0x1000 => "fifo",
+            0x2000 => "character device",
+            0x4000 => "directory",
+            0x6000 => "block device",
+            0x8000 => "regular file",
+            0xA000 => "symlink",
+            0xC000 => "socket",
+            _ => "unknown",
+        }
+    }
+
+    pub fn permissions(&self) -> u16 {
+        self.mode & 0o7777
+    }
+
+    pub fn mode_string(&self) -> String {
+        let type_char = match self.mode & 0xF000 {
+            0x1000 => 'p',
+            0x2000 => 'c',
+            0x4000 => 'd',
+            0x6000 => 'b',
+            0x8000 => '-',
+            0xA000 => 'l',
+            0xC000 => 's',
+            _ => '?',
+        };
+
+        let mut s = String::with_capacity(10);
+        s.push(type_char);
+        for (bit, ch) in [
+            (0o400, 'r'),
+            (0o200, 'w'),
+            (0o100, 'x'),
+            (0o040, 'r'),
+            (0o020, 'w'),
+            (0o010, 'x'),
+            (0o004, 'r'),
+            (0o002, 'w'),
+            (0o001, 'x'),
+        ] {
+            s.push(if self.mode & bit != 0 { ch } else { '-' });
+        }
+        s
+    }
+}
+
+impl fmt::Display for Inode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if f.alternate() {
+            return write!(
+                f,
+                "{:>8}  {}  uid {:<5} gid {:<5} {:>10} bytes  {} links",
+                self.number,
+                self.mode_string(),
+                self.uid,
+                self.gid,
+                self.size,
+                self.links_count,
+            );
+        }
+
+        writeln!(f, "inode {}", self.number)?;
+        writeln!(f, "  type:              {}", self.file_type())?;
+        writeln!(f, "  mode:              {:04o}", self.permissions())?;
+        writeln!(f, "  owner:             uid {}, gid {}", self.uid, self.gid)?;
+        writeln!(f, "  size:              {} bytes", self.size)?;
+        writeln!(f, "  links:             {}", self.links_count)?;
+        writeln!(f, "  blocks (512B):     {}", self.blocks)?;
+        writeln!(f, "  flags:             {:#x}", self.flags)?;
+        write!(
+            f,
+            "  times (epoch):     a={} c={} m={} cr={}",
+            self.atime, self.ctime, self.mtime, self.crtime
+        )
+    }
+}
+
 pub struct Volume {
     file: File,
     pub sb: Superblock,
@@ -264,6 +384,28 @@ impl Volume {
         (0..self.group_count() as u32)
             .map(|g| self.read_group(g))
             .collect()
+    }
+
+    pub fn read_inode(&mut self, number: u32) -> Result<Inode> {
+        if number == 0 {
+            bail!("Select a valid inode");
+        }
+
+        let per_group = self.sb.inodes_per_group;
+        let group = (number - 1) / per_group;
+        let index = (number - 1) % per_group;
+
+        let desc = self.read_group(group)?;
+        let inode_size = self.sb.inode_size as u64;
+        let offset = desc.inode_table * self.sb.block_size + index as u64 * inode_size;
+
+        let bytes = self.read_at(offset, inode_size as usize)?;
+        let mut buf = [0u8; 160];
+        let n = bytes.len().min(buf.len());
+        buf[..n].copy_from_slice(&bytes[..n]);
+        let raw: ext4_inode = *bytemuck::from_bytes(&buf);
+
+        Ok(Inode::from_raw(number, raw))
     }
 }
 
