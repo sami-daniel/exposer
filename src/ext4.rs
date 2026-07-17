@@ -27,6 +27,8 @@ const EXT4_MAX_DESC_SIZE: usize = 64;
 
 const MODE_PERM_MASK: u16 = 0o7777;
 
+pub const EXT4_ROOT_INO: u32 = 2; //
+
 #[derive(Debug, Clone)]
 pub struct Superblock {
     pub raw: Ext4SuperBlock,
@@ -281,6 +283,14 @@ impl Inode {
         self.mode as u32 & libc::S_IFMT == libc::S_IFDIR
     }
 
+    pub fn is_symlink(&self) -> bool {
+        self.mode as u32 & libc::S_IFMT == libc::S_IFLNK
+    }
+
+    pub fn is_regular(&self) -> bool {
+        self.mode as u32 & libc::S_IFMT == libc::S_IFREG
+    }
+
     pub fn file_type(&self) -> &'static str {
         match self.mode as u32 & libc::S_IFMT {
             libc::S_IFIFO => "fifo",
@@ -471,6 +481,28 @@ impl Volume {
         Ok(Inode::from_raw(number, raw))
     }
 
+    pub fn resolve_path(&mut self, path: &str) -> Result<Inode> {
+        let mut inode = self.read_inode(EXT4_ROOT_INO)?;
+
+        for name in path.split('/').filter(|c| !c.is_empty()) {
+            if inode.is_symlink() {
+                bail!("symlink resolution is not supported yet");
+            }
+
+            if !inode.is_dir() {
+                bail!("not a directory: {name}");
+            }
+
+            let entries = self.read_dir(&inode)?;
+            match entries.iter().find(|e| e.name == name) {
+                Some(entry) => inode = self.read_inode(entry.inode)?,
+                None => bail!("no such file or directory: {name}"),
+            }
+        }
+
+        Ok(inode)
+    }
+
     pub fn read_dir(&mut self, inode: &Inode) -> Result<Vec<DirEntry>> {
         if !inode.is_dir() {
             bail!("inode {} is not a directory", inode.number);
@@ -487,8 +519,8 @@ impl Volume {
     }
 
     pub fn read_file(&mut self, inode: &Inode) -> Result<Vec<u8>> {
-        if inode.is_dir() {
-            bail!("inode {} is a directory", inode.number);
+        if !inode.is_regular() {
+            bail!("inode {} is not a regular file", inode.number);
         }
 
         let size = inode.size as usize;

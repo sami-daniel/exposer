@@ -28,9 +28,9 @@ struct Args {
     )]
     free_inodes: bool,
 
-    /// List a directory by inode number. Defaults to the root directory
-    #[arg(long, value_name = "N", num_args = 0..=1, default_missing_value = "2")]
-    ls: Option<u32>,
+    /// List a directory by inode number or path. Defaults to the root directory
+    #[arg(long, value_name = "TARGET", num_args = 0..=1, default_missing_value = "/")]
+    ls: Option<String>,
 
     /// Print the raw content of a file by inode number
     #[arg(long, value_name = "N")]
@@ -48,12 +48,16 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    if let Some(number) = args.ls {
-        let dir = volume.read_inode(number)?;
+    if let Some(target) = args.ls {
+        let dir = match target.parse::<u32>() {
+            Ok(number) => volume.read_inode(number)?,
+            Err(_) => volume.resolve_path(&target)?,
+        };
+        let entries = volume.read_dir(&dir)?;
+
         println!("{:>8}  {:<16}  {}", "inode", "file type", "name");
         println!("{}", "-".repeat(40));
-
-        for entry in volume.read_dir(&dir)? {
+        for entry in entries {
             println!("{entry}");
         }
         return Ok(());
