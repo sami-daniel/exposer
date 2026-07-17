@@ -24,28 +24,22 @@ const EXT4_LEGACY_INODE_SIZE: u16 = 128;
 const EXT4_MIN_BLOCK_SIZE: u64 = 1024;
 const EXT4_MIN_DESC_SIZE: u16 = 32;
 const EXT4_MAX_DESC_SIZE: usize = 64;
-
 const MODE_PERM_MASK: u16 = 0o7777;
-
-pub const EXT4_ROOT_INO: u32 = 2; //
+pub const EXT4_ROOT_INO: u32 = 2;
 
 #[derive(Debug, Clone)]
 pub struct Superblock {
     pub raw: Ext4SuperBlock,
-
     pub block_size: u64,
     pub blocks_count: u64,
     pub free_blocks_count: u64,
     pub inodes_count: u32,
     pub free_inodes_count: u32,
-
     pub blocks_per_group: u32,
     pub inodes_per_group: u32,
     pub first_data_block: u32,
-
     pub inode_size: u16,
     pub desc_size: u16,
-
     pub has_64bit: bool,
     pub has_extents: bool,
     pub has_filetype: bool,
