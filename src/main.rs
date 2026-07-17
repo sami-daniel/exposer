@@ -1,6 +1,7 @@
 mod ext4;
 mod types;
 
+use std::io::Write;
 use std::path::PathBuf;
 
 use anyhow::Result;
@@ -30,11 +31,22 @@ struct Args {
     /// List a directory by inode number. Defaults to the root directory
     #[arg(long, value_name = "N", num_args = 0..=1, default_missing_value = "2")]
     ls: Option<u32>,
+
+    /// Print the raw content of a file by inode number
+    #[arg(long, value_name = "N")]
+    cat: Option<u32>,
 }
 
 fn main() -> Result<()> {
     let args = Args::parse();
     let mut volume = Volume::open(&args.partition)?;
+
+    if let Some(number) = args.cat {
+        let inode = volume.read_inode(number)?;
+        let data = volume.read_file(&inode)?;
+        std::io::stdout().write_all(&data)?;
+        return Ok(());
+    }
 
     if let Some(number) = args.ls {
         let dir = volume.read_inode(number)?;

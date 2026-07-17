@@ -202,6 +202,17 @@ const _: () = assert!(core::mem::size_of::<Ext4Extent>() == 12);
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone, Pod, Zeroable)]
+pub struct Ext4ExtentIdx {
+    pub logical_block: u32,
+    pub leaf_lo: u32,
+    pub leaf_hi: u16,
+    pub unused: u16,
+}
+
+const _: () = assert!(core::mem::size_of::<Ext4ExtentIdx>() == 12);
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone, Pod, Zeroable)]
 pub struct Ext4DirEntry {
     pub inode: u32,
     pub record_length: u16,

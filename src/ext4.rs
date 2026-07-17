@@ -9,7 +9,8 @@ use std::{
 use anyhow::{Result, bail};
 
 use crate::types::{
-    Ext4DirEntry, Ext4Extent, Ext4ExtentHeader, Ext4GroupDescriptor, Ext4Inode, Ext4SuperBlock,
+    Ext4DirEntry, Ext4Extent, Ext4ExtentHeader, Ext4ExtentIdx, Ext4GroupDescriptor, Ext4Inode,
+    Ext4SuperBlock,
 };
 
 const SUPERBLOCK_OFFSET: u64 = 1024;
@@ -78,6 +79,7 @@ pub struct Inode {
 
 #[derive(Debug, Clone, Copy)]
 pub struct Extent {
+    pub logical: u32,
     pub len: u16,
     pub physical: u64,
 }
@@ -456,7 +458,6 @@ impl Volume {
         let group = (number - 1) / per_group;
         let index = (number - 1) % per_group;
 
-        // TODO: This could be cached
         let desc = self.read_group(group)?;
         let inode_size = self.sb.inode_size as u64;
         let offset = desc.inode_table * self.sb.block_size + index as u64 * inode_size;
@@ -476,7 +477,7 @@ impl Volume {
         }
 
         let mut entries = Vec::new();
-        for extent in inode_extents(inode)? {
+        for extent in self.inode_extents(inode)? {
             for i in 0..extent.len as u64 {
                 let block = self.read_block(extent.physical + i)?;
                 parse_dir_block(&block, &mut entries);
@@ -484,45 +485,87 @@ impl Volume {
         }
         Ok(entries)
     }
-}
 
-fn inode_extents(inode: &Inode) -> Result<Vec<Extent>> {
-    let header_size = core::mem::size_of::<Ext4ExtentHeader>();
-    let extent_size = core::mem::size_of::<Ext4Extent>();
-    let bytes: &[u8] = bytemuck::bytes_of(&inode.block_map);
+    pub fn read_file(&mut self, inode: &Inode) -> Result<Vec<u8>> {
+        if inode.is_dir() {
+            bail!("inode {} is a directory", inode.number);
+        }
 
-    let header: Ext4ExtentHeader = *bytemuck::from_bytes(&bytes[..header_size]);
-    if header.magic != EXT4_EXT_MAGIC {
-        bail!("inode {} is not extent mapped. Not supported", inode.number);
+        let size = inode.size as usize;
+        let block_size = self.sb.block_size as usize;
+        let mut data = vec![0u8; size];
+
+        for extent in self.inode_extents(inode)? {
+            for i in 0..extent.len as u64 {
+                let file_offset = (extent.logical as u64 + i) as usize * block_size;
+                if file_offset >= size {
+                    break;
+                }
+                let block = self.read_block(extent.physical + i)?;
+                let n = (size - file_offset).min(block_size);
+                data[file_offset..file_offset + n].copy_from_slice(&block[..n]);
+            }
+        }
+        Ok(data)
     }
 
-    let depth = header.depth;
-    // TODO: Support non depth 0 extent trees
-    if depth != 0 {
-        bail!("inode {} has a depth {depth} extent tree", inode.number);
+    pub fn inode_extents(&mut self, inode: &Inode) -> Result<Vec<Extent>> {
+        let mut extents = Vec::new();
+        let root: &[u8] = bytemuck::bytes_of(&inode.block_map);
+        self.walk_extent_node(root, inode.number, &mut extents)?;
+        Ok(extents)
     }
 
-    let count = header.entries as usize;
-    let mut extents = Vec::with_capacity(count);
-    for i in 0..count {
-        let off = header_size + i * extent_size;
-        let e: Ext4Extent = *bytemuck::from_bytes(&bytes[off..off + extent_size]);
+    fn walk_extent_node(
+        &mut self,
+        node: &[u8],
+        inode_number: u32,
+        out: &mut Vec<Extent>,
+    ) -> Result<()> {
+        let header_size = core::mem::size_of::<Ext4ExtentHeader>();
+        let header: Ext4ExtentHeader = *bytemuck::from_bytes(&node[..header_size]);
+        if header.magic != EXT4_EXT_MAGIC {
+            bail!("inode {inode_number} is not extent mapped. Not supported");
+        }
+        let count = header.entries as usize;
 
-        // length over EXT_INIT_MAX_LEN marks an unwritten (preallocated) extent,
-        // whose real length is length - EXT_INIT_MAX_LEN. A value of exactly
-        // EXT_INIT_MAX_LEN is a written extent of that length, not unwritten, so
-        // this is a compare, not a mask (see ext4_ext_get_actual_len)
-        let raw_len = e.length;
-        let len = if raw_len <= EXT_INIT_MAX_LEN {
-            raw_len
+        if header.depth == 0 {
+            let extent_size = core::mem::size_of::<Ext4Extent>();
+            for i in 0..count {
+                let off = header_size + i * extent_size;
+                let e: Ext4Extent = *bytemuck::from_bytes(&node[off..off + extent_size]);
+
+                // length over EXT_INIT_MAX_LEN marks an unwritten (preallocated)
+                // extent, whose real length is length - EXT_INIT_MAX_LEN. A value
+                // of exactly EXT_INIT_MAX_LEN is a written extent of that length,
+                // not unwritten, so this is a compare, not a mask (see
+                // ext4_ext_get_actual_len)
+                let raw_len = e.length;
+                let len = if raw_len <= EXT_INIT_MAX_LEN {
+                    raw_len
+                } else {
+                    raw_len - EXT_INIT_MAX_LEN
+                };
+                let physical = e.start_lo as u64 | ((e.start_hi as u64) << 32);
+
+                out.push(Extent {
+                    logical: e.logical_block,
+                    len,
+                    physical,
+                });
+            }
         } else {
-            raw_len - EXT_INIT_MAX_LEN
-        };
-        let physical = e.start_lo as u64 | ((e.start_hi as u64) << 32);
-
-        extents.push(Extent { len, physical });
+            let idx_size = core::mem::size_of::<Ext4ExtentIdx>();
+            for i in 0..count {
+                let off = header_size + i * idx_size;
+                let idx: Ext4ExtentIdx = *bytemuck::from_bytes(&node[off..off + idx_size]);
+                let child_block = idx.leaf_lo as u64 | ((idx.leaf_hi as u64) << 32);
+                let child = self.read_block(child_block)?;
+                self.walk_extent_node(&child, inode_number, out)?;
+            }
+        }
+        Ok(())
     }
-    Ok(extents)
 }
 
 fn parse_dir_block(block: &[u8], out: &mut Vec<DirEntry>) {
